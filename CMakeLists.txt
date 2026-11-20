@@ -5,13 +5,17 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_compile_options(-Wall -Wextra)
-
-# 第 2 块会用到 std::thread，提前打开，避免到时出现 pthread_create 未定义
+# 第 2 块起服务端用 std::thread，必须有 -pthread
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-# common/ 里的头文件被服务端、客户端、测试三方共用，只在这里声明一次
+if(MSVC)
+    add_compile_options(/W4)
+else()
+    add_compile_options(-Wall -Wextra)
+endif()
+
+# common/ 被三个目标共用，只声明一次头文件路径
 add_library(chat_common INTERFACE)
 target_include_directories(chat_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/common)
 target_link_libraries(chat_common INTERFACE Threads::Threads)
@@ -22,9 +26,14 @@ target_link_libraries(chat_server PRIVATE chat_common)
 add_executable(chat_client client/main.cpp)
 target_link_libraries(chat_client PRIVATE chat_common)
 
-# 测试目标 + 注册到 CTest，之后可以用 ctest 跑，而不是手动 ./protocol_test
 enable_testing()
+
 add_executable(protocol_test tests/protocol_test.cpp)
 target_link_libraries(protocol_test PRIVATE chat_common)
 add_test(NAME protocol_test COMMAND protocol_test)
 
+# 集成测试：ctest 会以 $<TARGET_FILE:chat_server> 作为参数调用脚本
+add_test(NAME echo_integration
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/echo_integration.sh
+                 $<TARGET_FILE:chat_server>)
+set_tests_properties(echo_integration PROPERTIES TIMEOUT 60)
