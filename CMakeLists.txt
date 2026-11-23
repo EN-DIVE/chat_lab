@@ -33,7 +33,7 @@ target_link_libraries(protocol_test PRIVATE chat_common)
 add_test(NAME protocol_test COMMAND protocol_test)
 
 # 集成测试：ctest 会以 $<TARGET_FILE:chat_server> 作为参数调用脚本
-add_test(NAME echo_integration
-         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/echo_integration.sh
+add_test(NAME integration
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration.sh
                  $<TARGET_FILE:chat_server>)
-set_tests_properties(echo_integration PROPERTIES TIMEOUT 60)
+set_tests_properties(integration PROPERTIES TIMEOUT 60)
