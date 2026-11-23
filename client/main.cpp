@@ -1,9 +1,10 @@
-// client.cpp —— 第 3 块：先登录，再收发
+// client.cpp —— 第 4 块：登录 + 接收推送
 //
-// 相对第 2 块改了两处：
-//   1. 启动时拿昵称，发 LOGIN|昵称，收到 OK 才进入对话循环；
-//   2. 回包改成用 Reader 读：一次收到多行也不丢（第 2 块只取第一行）。
-// 仍是单线程“发一行 -> 等一行回包”，拆双线程要等服务端会主动推送（第 4/7 块）。
+// 第 3 块是“发一行 -> 等一行回包”，服务端一主动推 SYS 就不够用了，所以本块拆线程：
+//   1. 主线程只读键盘、发消息；
+//   2. 接收线程一直 Reader::next()，收到什么打印什么；
+//   3. 两个线程都写终端，加一把输出锁；
+//   4. 登录握手仍在开线程之前做，那一步是一问一答，单线程最省事。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread client.cpp -o client
 // 运行：./client [IP] [端口] [昵称]
@@ -14,13 +15,28 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
+#include <csignal>
 #include <cstring>
 #include <iostream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
+
+// 主线程和接收线程都会写终端，主线程-上行发数据，接收线程-接受server传来的数据
+// 主线程也会打印 如：'>'给你提示输出
+std::mutex g_out_mu;//全局输出锁，有c-s一问一答，也有s推送，两种输出不要竞态
+
+void say(const std::string& s) { //线程安全的打印
+    std::lock_guard<std::mutex> lk(g_out_mu);
+    std::cout << s << "\n" << std::flush;
+}
+
+std::atomic<bool> g_running{true}; //接收线程发现断线时置false，主线程据此退出
 
 // 按行读回包：缓冲区里已经切好的行先发出去，不够再 recv
 class Reader { //封装reader类读回包
@@ -49,9 +65,26 @@ private:
     std::vector<std::string> pending_;  // pending（待处理），一次收到多行时，剩下的先存这儿，存已经切分好还没有被取走的完整行
 };
 
+// 把协议行翻译成给人看的一行
+std::string pretty(const std::string& line) {
+    if (line.rfind("SYS|", 0) == 0) return "[系统] " + line.substr(4);//从4位开始后面才是推送内容
+    if (line.rfind("ONLINE|", 0) == 0) {
+        std::string s = "在线: ";
+        for (char ch : line.substr(7)) {
+            s += ch;
+            if (ch == ',') s += ' '; //ONLINE|a,b -> 在线: a, b
+        }
+        return s;
+    }
+    return line;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    // 和server同理，服务端可能随时断，send 触发 SIGPIPE 会直接杀掉客户端，所以忽略SIGPIPE
+    std::signal(SIGPIPE, SIG_IGN);
+
     const std::string host = (argc > 1) ? argv[1] : "127.0.0.1"; //传了地址就用传的，没传就默认本机回环
     const int port = (argc > 2) ? std::stoi(argv[2]) : 8888; //同上，没传默认8888
 
@@ -73,11 +106,11 @@ int main(int argc, char** argv) {
         ::close(fd);
         return 1;
     }
-    std::cout << "已连接 " << host << ":" << port << "，输入一行回车发送，/quit 退出\n";
+    std::cout << "已连接 " << host << ":" << port << "，输入一行回车发送，/quit 退出，/list 查询在线用户\n";
 
-    Reader reader(fd);
+    Reader reader(fd); //主线程创建了reader！！！
 
-    // 新增：登录握手，OK 才继续
+    // 登录握手，这里还是单线程，一问一答式，OK 才继续
     std::string name = (argc > 3) ? argv[3] : ""; //如果一开始命令行直接传了 ./client ip port name，直接用
     if (name.empty()) { //没传名字提示输入名字
         std::cout << "昵称: " << std::flush;
@@ -110,16 +143,32 @@ int main(int argc, char** argv) {
     }
     std::cout << "登录成功，输入一行回车发送，/quit 退出\n";
 
+    // 新建接收子线程。登录握手做完了，从现在开始服务端可能随时推消息
+    std::thread recv_thread([&reader] {
+        std::string line;
+        while (reader.next(line)) {
+            say(pretty(line)); //线程不断调用reader.next，say-带锁的print
+        }
+        g_running = false;//reader.next返回false，循环退出，代表服务端中断，告诉主线程和server的连接断掉了
+        say("服务端已断开");
+    });
+
     std::string text;
-    while (true) {
-        std::cout << "> " << std::flush;//flush强制输出
+    while (g_running) {
+        { //提示符也要和接收线程抢终端，包在输出锁里
+            std::lock_guard<std::mutex> lk(g_out_mu);
+            std::cout << "> " << std::flush;//flush强制输出
+        }
         if (!std::getline(std::cin, text)) break;  // Ctrl-D强制退出
         if (text.empty()) continue;
         //如果输入quit
         if (text == "/quit") {
-            chat::sendLine(fd, "QUIT");
-            if (reader.next(reply)) std::cout << "服务端: " << reply << "\n";//reader就是接受并读取服务器响应
+            chat::sendLine(fd, "QUIT"); //回包由接收线程打印，主线程只负责上传
             break;
+        }
+        if (text == "/list") { //获取在线用户列表
+            if (!chat::sendLine(fd, "LIST")) break;
+            continue;
         }
         if (text.find('|') != std::string::npos) {
             std::cout << "输入里不能含 '|'（第 8 块做转义）\n";
@@ -131,14 +180,10 @@ int main(int argc, char** argv) {
             std::cerr << "发送失败\n";
             break;
         }
-        if (!reader.next(reply)) { //不收到server回复就不能继续发
-            std::cout << "服务端已断开\n";
-            break;
-        }
-        std::cout << "服务端: " << reply << "\n";
     }
 
     ::shutdown(fd, SHUT_WR);//shutdown优雅关闭写方向
+    if (recv_thread.joinable()) recv_thread.join(); //等接收线程把最后一行打完
     ::close(fd);
     std::cout << "已断开\n";
     return 0;

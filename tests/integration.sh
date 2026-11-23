@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# tests/integration.sh —— 第 3 块集成测试：登录
+# tests/integration.sh —— 第 3~4 块集成测试：登录、在线列表、上下线通知
 # 启动真正的 chat_server，用 bash 内置的 /dev/tcp 当客户端（不需要 netcat）。
 #
 # 覆盖：登录成功 / 重名 / 未登录被拒 / 昵称校验 / 缺字段 / 断线释放昵称 /
-#       拆包 / 粘包 / QUIT / 超长行 / 多连接并发
+#       拆包 / 粘包 / QUIT / 超长行 / 多连接并发 / 上下线广播 / LIST / 逗号昵称
 #
 # 用法：bash tests/integration.sh ./build/chat_server [端口]
 set -u
@@ -280,6 +280,86 @@ case_concurrent() {
     fi
 }
 
+# ---------- L12 上线广播 + LIST ----------
+case_list_and_online() {
+    start_server
+    connect3 || { bad "L12 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L12 B 连接失败"; disconnect3; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'LOGIN|bob\n' >&4
+    read4
+    read3                        # alice 先收到 bob 的上线通知
+    local sys=$reply
+    printf 'LIST\n' >&3
+    read3
+    local list=$reply
+    disconnect4
+    disconnect3
+    sleep 0.15
+    stop_server
+    if [ "$sys" = "SYS|bob 上线了" ] && [ "$list" = "ONLINE|alice,bob" ]; then
+        ok "L12 上线广播 + LIST：SYS|bob 上线了，ONLINE|alice,bob"
+    else
+        bad "L12 广播/LIST：sys='$sys' list='$list'"
+    fi
+}
+
+# ---------- L13 下线广播 ----------
+case_offline_broadcast() {
+    start_server
+    connect3 || { bad "L13 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L13 B 连接失败"; disconnect3; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'LOGIN|bob\n' >&4
+    read4
+    read3                        # 先收掉 SYS|bob 上线了
+    disconnect4                  # bob 直接断，不发 QUIT
+    read3                        # 等下线通知
+    local sys=$reply
+    disconnect3
+    sleep 0.15
+    stop_server
+    if [ "$sys" = "SYS|bob 下线了" ]; then
+        ok "L13 下线广播：SYS|bob 下线了"
+    else
+        bad "L13 下线广播：sys='$sys'"
+    fi
+}
+
+# ---------- L14 未登录 LIST 被拒 ----------
+case_list_need_login() {
+    start_server
+    connect3 || { bad "L14 无法连接"; stop_server; return; }
+    printf 'LIST\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|NEED_LOGIN|请先登录" ]; then
+        ok "L14 未登录：LIST 也被 NEED_LOGIN 挡住"
+    else
+        bad "L14 未登录 LIST：reply='$reply'"
+    fi
+}
+
+# ---------- L15 昵称带逗号被拒 ----------
+case_comma_name() {
+    start_server
+    connect3 || { bad "L15 无法连接"; stop_server; return; }
+    printf 'LOGIN|a,b\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|BAD_FORMAT|昵称不能包含逗号（ONLINE 列表用逗号分隔）" ]; then
+        ok "L15 昵称校验：逗号会切乱 ONLINE 列表，被拒绝"
+    else
+        bad "L15 逗号昵称：reply='$reply'"
+    fi
+}
+
 case_login_ok
 case_dup_name
 case_need_login
@@ -291,6 +371,10 @@ case_pipeline
 case_quit
 case_long_line
 case_concurrent
+case_list_and_online
+case_offline_broadcast
+case_list_need_login
+case_comma_name
 
 printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
