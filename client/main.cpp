@@ -1,9 +1,9 @@
-// client.cpp —— 第 5 块：群聊
+// client.cpp —— 第 6 块：私聊
 //
-// 第 4 块的收发线程不动，这一块只动展示：
-//   1. pretty() 认识 CHAT|来源|内容；
-//   2. 服务端不把群消息回给发送者，所以自己的话由客户端本地打印；
-//   3. 其余 SYS / ONLINE 逻辑不变。
+// 第 5 块的线程结构不动，这一块加输入和展示：
+//   1. 输入 @昵称 内容，发 PRIV|昵称|内容，本地回显 [私聊->昵称]；
+//   2. pretty() 认识 PRIVIN|来源|内容，也把 ERR|代码|说明 翻译成 [错误 代码] 说明；
+//   3. 群聊、/list、上下线提示都不变。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread client.cpp -o client
 // 运行：./client [IP] [端口] [昵称]
@@ -77,12 +77,26 @@ std::string pretty(const std::string& line) {
         }
         return s;
     }
-    if (line.rfind("CHAT|", 0) == 0) { //第 5 块新增：CHAT|来源|内容 -> 来源: 内容
+    if (line.rfind("CHAT|", 0) == 0) { //群聊：CHAT|来源|内容 -> 来源: 内容
         std::string rest = line.substr(5); //裁掉前缀CHAT|后剩下的部分
         std::size_t bar = rest.find('|');
         if (bar != std::string::npos) { //bar-|位置
             return rest.substr(0, bar) + ": " + rest.substr(bar + 1);
         }
+    }
+    if (line.rfind("PRIVIN|", 0) == 0) { //私聊：PRIVIN|来源|内容 -> [私聊] 来源: 内容
+        std::string rest = line.substr(7); //裁掉前缀PRIVIN|后剩下的部分
+        std::size_t bar = rest.find('|');
+        if (bar != std::string::npos) {
+            return "[私聊] " + rest.substr(0, bar) + ": " + rest.substr(bar + 1);
+        }
+    }
+    if (line.rfind("ERR|", 0) == 0) { //ERR|代码|说明 -> [错误 代码] 说明
+        std::size_t p = line.find('|', 4);
+        if (p != std::string::npos) {
+            return "[错误 " + line.substr(4, p - 4) + "] " + line.substr(p + 1);
+        }
+        return "[错误] " + line.substr(4);
     }
     return line;
 }
@@ -114,7 +128,8 @@ int main(int argc, char** argv) {
         ::close(fd);
         return 1;
     }
-    std::cout << "已连接 " << host << ":" << port << "，输入一行回车发送，/quit 退出，/list 查询在线用户\n";
+    std::cout << "已连接 " << host << ":" << port
+              << "，输入一行回车发送，/quit 退出，/list 查询在线用户，@昵称 私聊\n";
 
     Reader reader(fd); //主线程创建了reader！！！
 
@@ -178,12 +193,36 @@ int main(int argc, char** argv) {
             if (!chat::sendLine(fd, "LIST")) break;
             continue;
         }
+
+        if (text[0] == '@') { //@昵称 内容 -> 私聊
+            std::size_t sp = text.find(' ');
+            //先分成昵称 内容两段
+            if (sp == std::string::npos || sp <= 1 || sp + 1 >= text.size()) {
+                std::cout << "用法: @昵称 内容（如 @alice 要一起做chat_lab吗？）\n";
+                continue;
+            }
+            std::string to = text.substr(1, sp - 1); //@后面到空格是对象
+            std::string body = text.substr(sp + 1);  //空格后面是内容
+            //进行合法性校验，不能有|
+            if (to.find('|') != std::string::npos || body.find('|') != std::string::npos) {
+                std::cout << "输入里不能含 '|'（第 8 块做转义）\n";
+                continue;
+            }
+            //发送私聊请求
+            if (!chat::sendLine(fd, "PRIV|" + to + "|" + body)) {
+                std::cerr << "发送失败\n";
+                break;
+            }
+            say("[私聊->" + to + "] " + body); //服务端不回发送者，本地回显
+            continue;
+        }
+
         if (text.find('|') != std::string::npos) {
             std::cout << "输入里不能含 '|'（第 8 块做转义）\n";
             continue;
         }
 
-        // 如果是信息，第 3 块起服务端按类型分派，普通发言走 MSG
+        // 普通群聊发言走 MSG
         if (!chat::sendLine(fd, "MSG|" + text)) { //给他加上MSG前缀
             std::cerr << "发送失败\n";
             break;

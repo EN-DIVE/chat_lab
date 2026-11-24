@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# tests/integration.sh —— 第 3~5 块集成测试：登录、在线列表、上下线通知、群聊
+# tests/integration.sh —— 第 3~6 块集成测试：登录、在线列表、上下线通知、群聊、私聊
 # 启动真正的 chat_server，用 bash 内置的 /dev/tcp 当客户端（不需要 netcat）。
 #
 # 覆盖：登录成功 / 重名 / 未登录被拒 / 昵称校验 / 缺字段 / 断线释放昵称 /
 #       拆包 / 粘包 / QUIT / 超长行 / 多连接并发 / 上下线广播 / LIST / 逗号昵称 /
-#       群聊广播 / 三人群聊 / 空消息 / 消息含竖线
+#       群聊广播 / 三人群聊 / 空消息 / 消息含竖线 / 私聊 / 私聊目标不在线
 #
 # 用法：bash tests/integration.sh ./build/chat_server [端口]
 set -u
@@ -469,6 +469,95 @@ case_pipe_in_msg() {
     fi
 }
 
+# ---------- L20 私聊只送达对象，第三人看不到 ----------
+case_private_chat() {
+    start_server
+    connect3 || { bad "L20 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L20 B 连接失败"; disconnect3; stop_server; return; }
+    connect5 || { bad "L20 C 连接失败"; disconnect4; disconnect3; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'LOGIN|bob\n' >&4
+    read4
+    read3                        # alice 收 SYS|bob 上线了
+    printf 'LOGIN|carol\n' >&5
+    read5
+    read3                        # alice 收 SYS|carol 上线了
+    read4                        # bob 收 SYS|carol 上线了
+    printf 'PRIV|bob|晚上自习吗\n' >&3
+    read4
+    local rb=$reply
+    read5                        # carol 不该看到私聊
+    local rc=$reply
+    read3                        # 发送者也不收回包
+    local ra=$reply
+    disconnect5
+    disconnect4
+    disconnect3
+    sleep 0.15
+    stop_server
+    if [ "$rb" = "PRIVIN|alice|晚上自习吗" ] && [ -z "$rc" ] && [ -z "$ra" ] \
+       && expect_log '私聊 alice -> bob: 晚上自习吗'; then
+        ok "L20 私聊：bob 收到 PRIVIN，carol 和 alice 都没收到"
+    else
+        bad "L20 私聊：rb='$rb' rc='$rc' ra='$ra'"
+    fi
+}
+
+# ---------- L21 私聊目标不在线 ----------
+case_private_offline() {
+    start_server
+    connect3 || { bad "L21 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'PRIV|nobody|hi\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|NO_SUCH_USER|用户不在线" ]; then
+        ok "L21 私聊目标不在线：回 NO_SUCH_USER"
+    else
+        bad "L21 目标不在线：reply='$reply'"
+    fi
+}
+
+# ---------- L22 私聊缺内容 ----------
+case_private_missing() {
+    start_server
+    connect3 || { bad "L22 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'PRIV|bob\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|BAD_FORMAT|PRIV 需要对象和内容两个字段" ]; then
+        ok "L22 私聊缺内容：回 BAD_FORMAT"
+    else
+        bad "L22 私聊缺内容：reply='$reply'"
+    fi
+}
+
+# ---------- L23 私聊内容含竖线 ----------
+case_private_pipe() {
+    start_server
+    connect3 || { bad "L23 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'PRIV|bob|a|b\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）" ]; then
+        ok "L23 私聊含竖线：回 BAD_FORMAT"
+    else
+        bad "L23 私聊含竖线：reply='$reply'"
+    fi
+}
+
 case_login_ok
 case_dup_name
 case_need_login
@@ -488,6 +577,10 @@ case_group_chat
 case_three_way
 case_empty_msg
 case_pipe_in_msg
+case_private_chat
+case_private_offline
+case_private_missing
+case_private_pipe
 
 printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

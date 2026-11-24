@@ -1,9 +1,9 @@
-// server.cpp —— 第 5 块：群聊
+// server.cpp —— 第 6 块：私聊
 //
-// 第 4 块的广播底座不动，这一块只是接上业务：
-//   1. MSG|内容 -> CHAT|来源|内容，广播给其他已登录的人，发送者自己不发；
-//   2. 来源由服务端填，不信任客户端自称的身份；
-//   3. 空内容、内容里带 '|' 都回 BAD_FORMAT。
+// 第 5 块的广播链路不动，这一块加“点对点”：
+//   1. PRIV|对象|内容 -> 查 online 表，只往对象一个 fd 写 PRIVIN|来源|内容；
+//   2. 对象不在线回 ERR|NO_SUCH_USER|用户不在线；
+//   3. 查表时把目标 shared_ptr 拷出来，出锁后再发，对象不会在发送前被析构。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread server.cpp -o server
 // 运行：./server [端口]        Ctrl-C 结束
@@ -175,6 +175,33 @@ void handleMsg(const std::shared_ptr<Client>& c, const std::vector<std::string>&
     broadcast("CHAT|" + c->name + "|" + f[1], c);//除发送者广播出去
 }
 
+// PRIV|对象|内容 -> 只发给对象一个人，回包 PRIVIN|来源|内容
+void handlePriv(const std::shared_ptr<Client>& c, const std::vector<std::string>& f) { //私聊
+    if (f.size() > 3) { //内容里出现'|'会被 split 切成多段
+        sendTo(*c, "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）");
+        return;
+    }
+    if (f.size() != 3 || f[1].empty() || f[2].empty()) { //对象、内容一个都不能少
+        sendTo(*c, "ERR|BAD_FORMAT|PRIV 需要对象和内容两个字段");
+        return;
+    }
+
+    std::shared_ptr<Client> dst; //destination 目标连接，信息要发给谁
+    {
+        std::lock_guard<std::mutex> lk(g_online_mu); //查表要加锁
+        auto it = g_online.find(f[1]); //在online表里查找f[1]，待发送对象的昵称
+        if (it != g_online.end()) dst = it->second; //拷一份 shared_ptr 出来，出锁后对象不会被析构
+    }
+
+    if (!dst) { //目标不在线或根本不存在
+        sendTo(*c, "ERR|NO_SUCH_USER|用户不在线");
+        return;
+    }
+    logMsg("私聊 " + c->name + " -> " + f[1] + ": " + f[2]);
+    // 点对点：只往目标一个fd去sendto
+    sendTo(*dst, "PRIVIN|" + c->name + "|" + f[2]);
+}
+
 // 连接结束摘表，否则昵称永远被占，重连就是 NAME_TAKEN
 void onDisconnect(const std::shared_ptr<Client>& c) { //下线清理函数
     if (!c->loggedIn()) return; //如果登陆状态时false，根本没登陆，不要操作online表
@@ -217,12 +244,17 @@ Action handleLine(const std::shared_ptr<Client>& c, const std::string& line) { /
         return Action::Keep;
     }
 
-    if (cmd == "MSG") { //第 5 块：群聊
+    if (cmd == "MSG") { //群聊
         handleMsg(c, f);
         return Action::Keep;
     }
 
-    // PRIV 在第 6 块实现，先明确回错，别让客户端干等回包
+    if (cmd == "PRIV") { //私聊
+        handlePriv(c, f);
+        return Action::Keep;
+    }
+
+    // 走到这里说明是协议里没定义的类型，回错即可
     sendTo(*c, "ERR|BAD_FORMAT|暂不支持的消息类型: " + cmd);
     return Action::Keep;
 }
