@@ -1,10 +1,9 @@
-// client.cpp —— 第 4 块：登录 + 接收推送
+// client.cpp —— 第 5 块：群聊
 //
-// 第 3 块是“发一行 -> 等一行回包”，服务端一主动推 SYS 就不够用了，所以本块拆线程：
-//   1. 主线程只读键盘、发消息；
-//   2. 接收线程一直 Reader::next()，收到什么打印什么；
-//   3. 两个线程都写终端，加一把输出锁；
-//   4. 登录握手仍在开线程之前做，那一步是一问一答，单线程最省事。
+// 第 4 块的收发线程不动，这一块只动展示：
+//   1. pretty() 认识 CHAT|来源|内容；
+//   2. 服务端不把群消息回给发送者，所以自己的话由客户端本地打印；
+//   3. 其余 SYS / ONLINE 逻辑不变。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread client.cpp -o client
 // 运行：./client [IP] [端口] [昵称]
@@ -52,7 +51,7 @@ public:
                 return false;
             }
             if (n == 0) return false;  // 服务端关闭
-            pending_ = lines_.feed(buf, static_cast<std::size_t>(n));// 把读到的字节（在buf里）喂给LineBuffer，切分行
+            pending_ = lines_.feed(buf, static_cast<std::size_t>(n));// feed(data,n);把读到的字节（在buf里）喂给LineBuffer，切分行
         }
         out = std::move(pending_.front());//把字符所有权转移给out
         pending_.erase(pending_.begin());//把out刚取走的给删掉
@@ -67,7 +66,9 @@ private:
 
 // 把协议行翻译成给人看的一行
 std::string pretty(const std::string& line) {
-    if (line.rfind("SYS|", 0) == 0) return "[系统] " + line.substr(4);//从4位开始后面才是推送内容
+    if (line.rfind("SYS|", 0) == 0) { //rfind从右向左扫，又限制了在0号位置匹配前缀，所以变成了前缀检验工具，是==0，否==npos
+        return "[系统] " + line.substr(4);//从4位开始后面才是推送内容
+    }
     if (line.rfind("ONLINE|", 0) == 0) {
         std::string s = "在线: ";
         for (char ch : line.substr(7)) {
@@ -75,6 +76,13 @@ std::string pretty(const std::string& line) {
             if (ch == ',') s += ' '; //ONLINE|a,b -> 在线: a, b
         }
         return s;
+    }
+    if (line.rfind("CHAT|", 0) == 0) { //第 5 块新增：CHAT|来源|内容 -> 来源: 内容
+        std::string rest = line.substr(5); //裁掉前缀CHAT|后剩下的部分
+        std::size_t bar = rest.find('|');
+        if (bar != std::string::npos) { //bar-|位置
+            return rest.substr(0, bar) + ": " + rest.substr(bar + 1);
+        }
     }
     return line;
 }
@@ -180,6 +188,7 @@ int main(int argc, char** argv) {
             std::cerr << "发送失败\n";
             break;
         }
+        say(name + ": " + text); //群聊：服务端不回发送者，自己的话本地打印一遍
     }
 
     ::shutdown(fd, SHUT_WR);//shutdown优雅关闭写方向

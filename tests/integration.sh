@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# tests/integration.sh —— 第 3~4 块集成测试：登录、在线列表、上下线通知
+# tests/integration.sh —— 第 3~5 块集成测试：登录、在线列表、上下线通知、群聊
 # 启动真正的 chat_server，用 bash 内置的 /dev/tcp 当客户端（不需要 netcat）。
 #
 # 覆盖：登录成功 / 重名 / 未登录被拒 / 昵称校验 / 缺字段 / 断线释放昵称 /
-#       拆包 / 粘包 / QUIT / 超长行 / 多连接并发 / 上下线广播 / LIST / 逗号昵称
+#       拆包 / 粘包 / QUIT / 超长行 / 多连接并发 / 上下线广播 / LIST / 逗号昵称 /
+#       群聊广播 / 三人群聊 / 空消息 / 消息含竖线
 #
 # 用法：bash tests/integration.sh ./build/chat_server [端口]
 set -u
@@ -20,6 +21,8 @@ cleanup() {
     exec 3>&- 2>/dev/null
     exec 4<&- 2>/dev/null
     exec 4>&- 2>/dev/null
+    exec 5<&- 2>/dev/null
+    exec 5>&- 2>/dev/null
     if [ -n "$SPID" ]; then
         kill "$SPID" 2>/dev/null
         wait "$SPID" 2>/dev/null
@@ -63,11 +66,21 @@ connect4() {
     return 1
 }
 
+connect5() {
+    for _ in $(seq 1 20); do
+        if exec 5<>"/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then return 0; fi
+        sleep 0.1
+    done
+    return 1
+}
+
 disconnect3() { exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null; }
 disconnect4() { exec 4<&- 2>/dev/null; exec 4>&- 2>/dev/null; }
+disconnect5() { exec 5<&- 2>/dev/null; exec 5>&- 2>/dev/null; }
 
 read3() { reply=""; IFS= read -r -t 1 -u 3 reply || true; }
 read4() { reply=""; IFS= read -r -t 1 -u 4 reply || true; }
+read5() { reply=""; IFS= read -r -t 1 -u 5 reply || true; }
 
 expect_log() { grep -qF -- "$1" "$LOG"; }
 
@@ -207,13 +220,13 @@ case_pipeline() {
     printf 'LOGIN|bob\nMSG|hi\n' >&3
     read3
     local r1=$reply
-    read3
+    read3                        # 第 5 块起 MSG 不给发送者回包，这里读超时为空
     local r2=$reply
     disconnect3
     sleep 0.1
     stop_server
-    if [ "$r1" = "OK|登录成功" ] && [ "$r2" = "ERR|BAD_FORMAT|暂不支持的消息类型: MSG" ]; then
-        ok "L08 粘包：两行分别分派"
+    if [ "$r1" = "OK|登录成功" ] && [ -z "$r2" ] && expect_log '群聊 bob -> hi'; then
+        ok "L08 粘包：两行分别分派，MSG 无回包但已广播"
     else
         bad "L08 粘包：r1='$r1' r2='$r2'"
     fi
@@ -360,6 +373,102 @@ case_comma_name() {
     fi
 }
 
+# ---------- L16 群聊：发送者自己收不到 ----------
+case_group_chat() {
+    start_server
+    connect3 || { bad "L16 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L16 B 连接失败"; disconnect3; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'LOGIN|bob\n' >&4
+    read4
+    read3                        # 收掉 SYS|bob 上线了
+    printf 'MSG|大家好\n' >&3
+    read4
+    local got=$reply
+    read3                        # 发送者不该收到 CHAT，读超时为空
+    local self=$reply
+    disconnect4
+    disconnect3
+    sleep 0.15
+    stop_server
+    if [ "$got" = "CHAT|alice|大家好" ] && [ -z "$self" ] && expect_log '群聊 alice -> 大家好'; then
+        ok "L16 群聊：bob 收到 CHAT|alice|大家好，alice 自己不收"
+    else
+        bad "L16 群聊：got='$got' self='$self'"
+    fi
+}
+
+# ---------- L17 三人群聊：两个接收者都收到 ----------
+case_three_way() {
+    start_server
+    connect3 || { bad "L17 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L17 B 连接失败"; disconnect3; stop_server; return; }
+    connect5 || { bad "L17 C 连接失败"; disconnect4; disconnect3; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'LOGIN|bob\n' >&4
+    read4
+    read3                        # alice 收 SYS|bob 上线了
+    printf 'LOGIN|carol\n' >&5
+    read5
+    read3                        # alice 收 SYS|carol 上线了
+    read4                        # bob 收 SYS|carol 上线了
+    printf 'MSG|hi\n' >&3
+    read4
+    local rb=$reply
+    read5
+    local rc=$reply
+    read3                        # alice 自己不收
+    local ra=$reply
+    disconnect5
+    disconnect4
+    disconnect3
+    sleep 0.15
+    stop_server
+    if [ "$rb" = "CHAT|alice|hi" ] && [ "$rc" = "CHAT|alice|hi" ] && [ -z "$ra" ]; then
+        ok "L17 三人群聊：bob、carol 都收到，alice 自己不收"
+    else
+        bad "L17 三人群聊：rb='$rb' rc='$rc' ra='$ra'"
+    fi
+}
+
+# ---------- L18 MSG 空内容被拒 ----------
+case_empty_msg() {
+    start_server
+    connect3 || { bad "L18 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'MSG|\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|BAD_FORMAT|MSG 需要一个非空内容" ]; then
+        ok "L18 空消息：回 BAD_FORMAT"
+    else
+        bad "L18 空消息：reply='$reply'"
+    fi
+}
+
+# ---------- L19 MSG 内容含竖线被拒 ----------
+case_pipe_in_msg() {
+    start_server
+    connect3 || { bad "L19 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'MSG|a|b\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）" ]; then
+        ok "L19 消息含竖线：回 BAD_FORMAT"
+    else
+        bad "L19 消息含竖线：reply='$reply'"
+    fi
+}
+
 case_login_ok
 case_dup_name
 case_need_login
@@ -375,6 +484,10 @@ case_list_and_online
 case_offline_broadcast
 case_list_need_login
 case_comma_name
+case_group_chat
+case_three_way
+case_empty_msg
+case_pipe_in_msg
 
 printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

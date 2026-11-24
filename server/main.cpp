@@ -1,11 +1,9 @@
-// server.cpp —— 第 4 块：在线列表与上下线通知
+// server.cpp —— 第 5 块：群聊
 //
-// 第 3 块的登录骨架不动，这一块加“看见别人”：
-//   1. LIST 回 ONLINE|a,b,c；
-//   2. 有人登录成功，给其他已登录的人广播 SYS|xx 上线了；
-//   3. 有人下线，广播 SYS|xx 下线了；
-//   4. 广播时锁内只拷名单，锁外再逐个发；昵称里禁止逗号；
-//   5. 忽略 SIGPIPE：广播对象可能已经死了，send 不能把服务端带走。
+// 第 4 块的广播底座不动，这一块只是接上业务：
+//   1. MSG|内容 -> CHAT|来源|内容，广播给其他已登录的人，发送者自己不发；
+//   2. 来源由服务端填，不信任客户端自称的身份；
+//   3. 空内容、内容里带 '|' 都回 BAD_FORMAT。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread server.cpp -o server
 // 运行：./server [端口]        Ctrl-C 结束
@@ -161,6 +159,22 @@ void handleList(const std::shared_ptr<Client>& c) { //c请求者
     sendTo(*c, "ONLINE|" + names); //锁外再发
 }
 
+// 第 5 块新增：MSG|内容 -> CHAT|来源|内容，广播给其他人，发送者自己不发
+void handleMsg(const std::shared_ptr<Client>& c, const std::vector<std::string>& f) { //群聊
+    //先处理错误信息情况
+    if (f.size() > 2) { //内容里出现'|'会被 split 切成多段，第 8 块再做转义
+        sendTo(*c, "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）");
+        return;
+    }
+    if (f.size() != 2 || f[1].empty()) { //没有内容或内容为空，server 不信任 client：字段数、空内容都要自己挡
+        sendTo(*c, "ERR|BAD_FORMAT|MSG 需要一个非空内容");
+        return;
+    }
+    logMsg("群聊 " + c->name + " -> " + f[1]);
+    // logmsg日志打印函数，来源用服务端记下的 c->name
+    broadcast("CHAT|" + c->name + "|" + f[1], c);//除发送者广播出去
+}
+
 // 连接结束摘表，否则昵称永远被占，重连就是 NAME_TAKEN
 void onDisconnect(const std::shared_ptr<Client>& c) { //下线清理函数
     if (!c->loggedIn()) return; //如果登陆状态时false，根本没登陆，不要操作online表
@@ -203,7 +217,12 @@ Action handleLine(const std::shared_ptr<Client>& c, const std::string& line) { /
         return Action::Keep;
     }
 
-    // MSG / PRIV 在第 5~6 块实现，先明确回错，别让客户端干等回包
+    if (cmd == "MSG") { //第 5 块：群聊
+        handleMsg(c, f);
+        return Action::Keep;
+    }
+
+    // PRIV 在第 6 块实现，先明确回错，别让客户端干等回包
     sendTo(*c, "ERR|BAD_FORMAT|暂不支持的消息类型: " + cmd);
     return Action::Keep;
 }
