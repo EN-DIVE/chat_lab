@@ -37,3 +37,9 @@ add_test(NAME integration
          COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/integration.sh
                  $<TARGET_FILE:chat_server>)
 set_tests_properties(integration PROPERTIES TIMEOUT 60)
+
+# 客户端端到端：真的启动 chat_client，用管道喂输入
+add_test(NAME client_e2e
+         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/client_e2e.sh
+                 $<TARGET_FILE:chat_server> $<TARGET_FILE:chat_client>)
+set_tests_properties(client_e2e PROPERTIES TIMEOUT 60)
