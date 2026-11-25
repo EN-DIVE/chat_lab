@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# tests/integration.sh —— 第 3~6 块集成测试：登录、在线列表、上下线通知、群聊、私聊
+# tests/integration.sh —— 第 3~8 块集成测试
 # 启动真正的 chat_server，用 bash 内置的 /dev/tcp 当客户端（不需要 netcat）。
 #
-# 覆盖：登录成功 / 重名 / 未登录被拒 / 昵称校验 / 缺字段 / 断线释放昵称 /
-#       拆包 / 粘包 / QUIT / 超长行 / 多连接并发 / 上下线广播 / LIST / 逗号昵称 /
-#       群聊广播 / 三人群聊 / 空消息 / 消息含竖线 / 私聊 / 私聊目标不在线
+# 覆盖：登录 / 重名 / 未登录被拒 / 昵称校验 / 缺字段 / 断线释放昵称 / 拆包 / 粘包 /
+#       QUIT / 超长行 / 并发 / 上下线广播 / LIST / 逗号昵称 / 群聊 / 三人群聊 /
+#       空消息 / 消息含竖线 / 私聊 / 目标不在线 / 空白行 / 多余字段 / 抓包日志
 #
 # 用法：bash tests/integration.sh ./build/chat_server [端口]
 set -u
@@ -164,8 +164,8 @@ case_missing_field() {
     disconnect3
     sleep 0.1
     stop_server
-    if [ "$reply" = "ERR|BAD_FORMAT|用法: LOGIN|昵称" ]; then
-        ok "L05 缺字段：回用法提示"
+    if [ "$reply" = "ERR|BAD_FORMAT|用法: LOGIN 昵称" ]; then
+        ok "L05 缺字段：回用法提示（说明里不含 |）"
     else
         bad "L05 缺字段：reply='$reply'"
     fi
@@ -462,7 +462,7 @@ case_pipe_in_msg() {
     disconnect3
     sleep 0.1
     stop_server
-    if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）" ]; then
+    if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线" ]; then
         ok "L19 消息含竖线：回 BAD_FORMAT"
     else
         bad "L19 消息含竖线：reply='$reply'"
@@ -551,10 +551,90 @@ case_private_pipe() {
     disconnect3
     sleep 0.1
     stop_server
-    if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）" ]; then
+    if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线" ]; then
         ok "L23 私聊含竖线：回 BAD_FORMAT"
     else
         bad "L23 私聊含竖线：reply='$reply'"
+    fi
+}
+
+# ---------- L24 空白行被忽略 ----------
+case_blank_lines() {
+    start_server
+    connect3 || { bad "L24 无法连接"; stop_server; return; }
+    printf '   \n\n\t\nLOGIN|alice\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "OK|登录成功" ] && ! grep -qF '暂不支持的消息类型' "$LOG"; then
+        ok "L24 空白行：被忽略，不影响后续命令"
+    else
+        bad "L24 空白行：reply='$reply'"
+    fi
+}
+
+# ---------- L25 LIST 带多余字段 ----------
+case_list_extra_field() {
+    start_server
+    connect3 || { bad "L25 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'LIST|x\n' >&3
+    read3
+    local r1=$reply
+    printf 'LIST\n' >&3
+    read3
+    local r2=$reply
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$r1" = "ERR|BAD_FORMAT|LIST 不带参数" ] && [ "$r2" = "ONLINE|alice" ]; then
+        ok "L25 LIST 多余字段：先拒绝，正常 LIST 仍可用"
+    else
+        bad "L25 LIST 多余字段：r1='$r1' r2='$r2'"
+    fi
+}
+
+# ---------- L26 QUIT 带多余字段 ----------
+case_quit_extra_field() {
+    start_server
+    connect3 || { bad "L26 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'QUIT|x\n' >&3
+    read3
+    local r1=$reply
+    printf 'QUIT\n' >&3
+    read3
+    local r2=$reply
+    local rc=0
+    IFS= read -r -t 1 -u 3 _ || rc=$?
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$r1" = "ERR|BAD_FORMAT|QUIT 不带参数" ] && [ "$r2" = "OK|再见" ] && [ "$rc" = "1" ]; then
+        ok "L26 QUIT 多余字段：先拒绝，正常 QUIT 仍有效"
+    else
+        bad "L26 QUIT 多余字段：r1='$r1' r2='$r2' eof_rc=$rc"
+    fi
+}
+
+# ---------- L27 抓包式日志 ----------
+case_wiretap_log() {
+    start_server
+    connect3 || { bad "L27 无法连接"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    printf 'MSG|hi\n' >&3
+    sleep 0.2
+    disconnect3
+    sleep 0.1
+    stop_server
+    if expect_log '[C->S] alice' && expect_log '[S->C] alice'; then
+        ok "L27 抓包日志：C->S 和 S->C 都有记录"
+    else
+        bad "L27 抓包日志：缺少方向标记"
     fi
 }
 
@@ -581,6 +661,10 @@ case_private_chat
 case_private_offline
 case_private_missing
 case_private_pipe
+case_blank_lines
+case_list_extra_field
+case_quit_extra_field
+case_wiretap_log
 
 printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

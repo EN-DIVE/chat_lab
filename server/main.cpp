@@ -1,9 +1,11 @@
-// server.cpp —— 第 6 块：私聊
+// server.cpp —— 第 8 块：健壮性收尾
 //
-// 第 5 块的广播链路不动，这一块加“点对点”：
-//   1. PRIV|对象|内容 -> 查 online 表，只往对象一个 fd 写 PRIVIN|来源|内容；
-//   2. 对象不在线回 ERR|NO_SUCH_USER|用户不在线；
-//   3. 查表时把目标 shared_ptr 拷出来，出锁后再发，对象不会在发送前被析构。
+// 前 7 块的功能不动，这一块统一协议口径并加抓包式日志：
+//   1. 空行、纯空白行直接忽略；
+//   2. QUIT、LIST 不接受多余字段；LOGIN 的用法提示里不再出现 '|'；
+//   3. MSG/PRIV 内容含 '|' 直接拒绝（'|' 是字段分隔符，不允许出现在字段里）；
+//   4. 日志统一加时间戳，并按 [C->S] / [S->C] 打出双向报文；
+//   5. 超长行仍按协议错误处理：回 ERR 后关闭连接（正常客户端已提前拦截）。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread server.cpp -o server
 // 运行：./server [端口]        Ctrl-C 结束
@@ -18,6 +20,7 @@
 #include <cerrno>
 #include <csignal>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -31,9 +34,24 @@ namespace {
 // 多个连接线程都会写日志，不加锁会出现两行粘在一起
 std::mutex g_log_mu;//globle log mutex全局日志锁
 
+// HH:MM:SS，抓包式日志的时间戳
+std::string nowStamp() {
+    std::time_t t = std::time(nullptr); //获取当前系统时间（秒数）
+    std::tm tm{};//tm结构体，用来存放拆开的时间时分秒......
+    localtime_r(&t, &tm); // 把time的秒数转换为本地时区的时分秒，填入tm，线程安全版本，自己传自己创建的tm内存而非存入全局共享缓冲区
+    char buf[16];
+    std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);//格式化 时分秒
+    return buf;
+}
+
 void logMsg(const std::string& msg) { //logMsg 的本质不是 “日志打印函数”，是**多线程安全的打印函数**，锁才是灵魂
     std::lock_guard<std::mutex> lk(g_log_mu);//lock_guard 自动锁，创建函数自动lock，离开大括号自动unlock--让它一旦开始日志函数就先lock锁住，等到打印完成之后出括号再自动解锁
-    std::cout << msg << "\n" << std::flush;//flush强行把缓冲区内容刷到终端，实时看到日志
+    std::cout << "[" << nowStamp() << "] " << msg << "\n" << std::flush;//时间戳 + flush强行把缓冲区内容刷到终端，实时看到日志
+}
+
+// 判断是不是全空白 空格和tab
+bool isBlank(const std::string& s) {
+    return s.find_first_not_of(" \t") == std::string::npos;//找第一个不是空格、也不是 tab 的字符的位置
 }
 
 std::atomic<int> g_active{0};  // 当前TCP连接数(开着的线程数)，和后续登录计数无关！仅用于日志，统计当前在线客户端数量，g_active.load() // 读取当前值
@@ -56,6 +74,9 @@ struct Client { //新建client结构体
 
 // 所有发给这个客户端的数据统一走这个函数，强制上锁，统一规范。“广播时多个线程写同一连接”
 bool sendTo(Client& c, const std::string& line) {
+    //发出方向（s->c）的抓包日志。放在锁外打，日志锁和写锁不嵌套
+    logMsg("[S->C] " + (c.name.empty() ? c.tag() : c.name) + " " +
+           std::to_string(line.size()) + "B " + line); //[21:46:51] [C->S] alice 7B LIST
     std::lock_guard<std::mutex> lk(c.wmu);
     return chat::sendLine(c.fd, line);
 }
@@ -108,7 +129,7 @@ void handleLogin(const std::shared_ptr<Client>& c, const std::vector<std::string
         return;
     }
     if (f.size() != 2) { //用户端输入的命令是不是被split切成两个字段
-        sendTo(*c, "ERR|BAD_FORMAT|用法: LOGIN|昵称");
+        sendTo(*c, "ERR|BAD_FORMAT|用法: LOGIN 昵称"); //说明文字里不能再出现 '|'
         return;
     }
     //以上其实client不会犯错，但是server不可以信任client！健壮性。
@@ -162,8 +183,8 @@ void handleList(const std::shared_ptr<Client>& c) { //c请求者
 // 第 5 块新增：MSG|内容 -> CHAT|来源|内容，广播给其他人，发送者自己不发
 void handleMsg(const std::shared_ptr<Client>& c, const std::vector<std::string>& f) { //群聊
     //先处理错误信息情况
-    if (f.size() > 2) { //内容里出现'|'会被 split 切成多段，第 8 块再做转义
-        sendTo(*c, "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）");
+    if (f.size() > 2) { //内容里出现'|'会被 split 切成多段，'|' 是协议分隔符，直接拒绝
+        sendTo(*c, "ERR|BAD_FORMAT|内容里不能包含竖线");
         return;
     }
     if (f.size() != 2 || f[1].empty()) { //没有内容或内容为空，server 不信任 client：字段数、空内容都要自己挡
@@ -178,7 +199,7 @@ void handleMsg(const std::shared_ptr<Client>& c, const std::vector<std::string>&
 // PRIV|对象|内容 -> 只发给对象一个人，回包 PRIVIN|来源|内容
 void handlePriv(const std::shared_ptr<Client>& c, const std::vector<std::string>& f) { //私聊
     if (f.size() > 3) { //内容里出现'|'会被 split 切成多段
-        sendTo(*c, "ERR|BAD_FORMAT|内容里不能包含竖线（第 8 块做转义）");
+        sendTo(*c, "ERR|BAD_FORMAT|内容里不能包含竖线");
         return;
     }
     if (f.size() != 3 || f[1].empty() || f[2].empty()) { //对象、内容一个都不能少
@@ -231,6 +252,10 @@ Action handleLine(const std::shared_ptr<Client>& c, const std::string& line) { /
         return Action::Keep;
     }
     if (cmd == "QUIT") {
+        if (f.size() != 1) { //QUIT不带参数，多出来的字段说明客户端不守协议
+            sendTo(*c, "ERR|BAD_FORMAT|QUIT 不带参数");
+            return Action::Keep;
+        }
         sendTo(*c, "OK|再见");
         return Action::Close;
     }
@@ -240,6 +265,10 @@ Action handleLine(const std::shared_ptr<Client>& c, const std::string& line) { /
     }
 
     if (cmd == "LIST") { //LIST请求在线用户名单
+        if (f.size() != 1) { //同样QUIT不接受多余字段
+            sendTo(*c, "ERR|BAD_FORMAT|LIST 不带参数");
+            return Action::Keep;
+        }
         handleList(c);
         return Action::Keep;
     }
@@ -255,7 +284,8 @@ Action handleLine(const std::shared_ptr<Client>& c, const std::string& line) { /
     }
 
     // 走到这里说明是协议里没定义的类型，回错即可
-    sendTo(*c, "ERR|BAD_FORMAT|暂不支持的消息类型: " + cmd);
+    std::string shown = cmd.substr(0, 16); //回显前截断，不会超长乱码原样弹回去
+    sendTo(*c, "ERR|BAD_FORMAT|暂不支持的消息类型: " + shown);
     return Action::Keep;
 }
 
@@ -289,9 +319,11 @@ void serveOne(const std::shared_ptr<Client>& c) {
             return;
         }
 
-        for (const std::string& line : got) {
-            if (line.empty()) continue;
-            logMsg("收到（" + (c->loggedIn() ? c->name : c->tag()) + "）: " + line);//如果已登录显示昵称，未登录显示ip:port
+        for (const std::string& line : got) { //遍历got里面的命令
+            if (isBlank(line)) continue; //空行、纯空白行都直接丢掉
+            // 接收方向（c->s）的抓包日志，已登录显示昵称，未登录显示 ip:port
+            logMsg("[C->S] " + (c->loggedIn() ? c->name : c->tag()) + " " +
+                   std::to_string(line.size()) + "B " + line);
             if (handleLine(c, line) == Action::Close) { //处理收到的命令，split
                 logMsg("客户端主动退出: " + c->tag());
                 return;

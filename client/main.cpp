@@ -1,10 +1,9 @@
-// client.cpp —— 第 7 块：客户端收尾
+// client.cpp —— 第 8 块：健壮性收尾
 //
-// 第 6 块的收发结构不动，这一块把“用起来像个聊天工具”该有的补齐：
-//   1. 登录做成状态机：ERR 不再退出，改成重新要昵称；
-//   2. 推送到达时擦掉提示符再打印，打完把 "> " 补回来；
-//   3. 发送前检查整行长度，超长本地拦下，不再让服务端把你踢下线；
-//   4. 新增 /help。
+// 第 7 块的结构不动，这一块只收口输入：
+//   1. 纯空白行直接忽略，不发出去；
+//   2. '|' 统一在本地拒绝，提示文案定稿（协议用 | 分隔字段）；
+//   3. 其余行为不变。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread client.cpp -o client
 // 运行：./client [IP] [端口] [昵称]
@@ -232,11 +231,13 @@ int main(int argc, char** argv) {
     std::string text;
     while (state == State::LoggedIn && g_running) { //已登录且服务端连接
         showPrompt(); //没有打印提示符就打印>
+
         if (!std::getline(std::cin, text)) break;  // Ctrl-D强制退出
         g_prompt_shown = false; //键入回车，就把prompt_shown改成false
-        if (!g_running) break;  //等待输入期间服务端断了
-        if (text.empty()) continue;
 
+        if (!g_running) break;  //等待输入期间服务端断了
+        //下面开始处理text
+        if (text.find_first_not_of(" \t") == std::string::npos) continue; //空白行直接忽略 空格 tab
         if (text == "/quit") {
             chat::sendLine(fd, "QUIT"); //回包由接收线程打印，主线程只负责上传
             state = State::Disconnected;
@@ -262,7 +263,7 @@ int main(int argc, char** argv) {
             std::string body = text.substr(sp + 1);  //空格后面是内容
             //进行合法性校验，不能有|
             if (to.find('|') != std::string::npos || body.find('|') != std::string::npos) {
-                std::cout << "输入里不能含 '|'（第 8 块做转义）\n";
+                std::cout << "输入里不能含 '|'（协议用 | 分隔字段）\n";
                 continue;
             }
             //长度校验
@@ -281,8 +282,9 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        //群聊
         if (text.find('|') != std::string::npos) {
-            std::cout << "输入里不能含 '|'（第 8 块做转义）\n";
+            std::cout << "输入里不能含 '|'（协议用 | 分隔字段）\n";
             continue;
         }
 
