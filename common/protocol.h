@@ -1,8 +1,7 @@
-// protocol.h —— 聊天程序的传输协议底座
+// protocol.h 
 //
-// 约定：一条消息 = 一行 UTF-8 文本 + '\n'，字段之间用 '|' 分隔。
-// TCP 是字节流，没有“消息边界”，所以收到什么都不能假设“一次 recv = 一条消息”。
-// LineBuffer 负责把字节流切成一条条完整的行；sendLine 负责保证整行写完。
+// 协议：一帧=一行UTF-8文本+'\n'. 字段之间用|隔开
+// LineBuffer--按/n把字节流切成一条条完整的行；sendLine--调用sendall发送，在末尾加上/n；split--按|切割字段
 #pragma once
 
 #include <sys/socket.h>

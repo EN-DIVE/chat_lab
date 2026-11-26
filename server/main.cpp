@@ -1,14 +1,4 @@
 // server.cpp
-//   1. 空行、纯空白行直接忽略；
-//   2. QUIT、LIST 不接受多余字段；LOGIN 的用法提示里不再出现 '|'；
-//   3. MSG/PRIV 内容含 '|' 直接拒绝（'|' 是字段分隔符，不允许出现在字段里）；
-//   4. 日志统一加时间戳，并按 [C->S] / [S->C] 打出双向报文；
-//   5. 超长行仍按协议错误处理：回 ERR 后关闭连接（正常客户端已提前拦截）。
-//   6. 昵称禁止空格、私聊发送失败要回错，保证 @昵称 一定能解析、消息不会静默丢失。
-//   7. 私聊目标离线时先暂存，对方登录后自动投递（每人最多 20 条）。
-//
-// 编译：g++ -std=c++17 -Wall -Wextra -pthread server.cpp -o server
-// 运行：./server [端口]        Ctrl-C 结束
 #include "protocol.h"
 
 #include <arpa/inet.h>
@@ -54,9 +44,7 @@ bool isBlank(const std::string& s) {
     return s.find_first_not_of(" \t") == std::string::npos;//找第一个不是空格、也不是 tab 的字符的位置
 }
 
-std::atomic<int> g_active{0};  // 当前TCP连接数(开着的线程数)，和后续登录计数无关！仅用于日志，统计当前在线客户端数量，g_active.load() // 读取当前值
-
-// 一条连接的上下文。fd 谁创建谁负责关闭：这里交给析构函数，线程结束时自动 close
+// fd 谁创建谁负责关闭：这里交给析构函数，线程结束时自动 close
 struct Client { //新建client结构体
     int fd = -1; //socket，//fd 是这条 TCP 连接的句柄，内核早就记住了这条连接的四元组：(本机 IP, 本机端口，对端 IP, 对端端口)；fd 只是给你用户态程序用的一个 “快捷编号”，用来查内核里那张四元组表。
     std::string ip;
@@ -72,14 +60,7 @@ struct Client { //新建client结构体
     bool loggedIn() const { return !name.empty(); }  // 判断是否登录，已登录-empty=false-！取反-true，未登录-false
 };
 
-// 所有发给这个客户端的数据统一走这个函数，强制上锁，统一规范。“广播时多个线程写同一连接”
-bool sendTo(Client& c, const std::string& line) {
-    //发出方向（s->c）的抓包日志。放在锁外打，日志锁和写锁不嵌套
-    logMsg("[S->C] " + (c.name.empty() ? c.tag() : c.name) + " " +
-           std::to_string(line.size()) + "B " + line); //[21:46:51] [C->S] alice 7B LIST
-    std::lock_guard<std::mutex> lk(c.wmu);
-    return chat::sendLine(c.fd, line);
-}
+std::atomic<int> g_active{0};  // 当前TCP连接数(开着的线程数)，和后续登录计数无关！仅用于日志，统计当前在线客户端数量，g_active.load() // 读取当前值
 
 // online表，昵称 -> 连接。value 用 shared_ptr，广播时连接对象不会被析构
 std::mutex g_online_mu;//用户online表配套锁
@@ -89,6 +70,15 @@ std::map<std::string, std::shared_ptr<Client>> g_online; // map--key昵称 value
 constexpr std::size_t kOfflineCap = 20; //每人最多存 20 条，超出丢最旧的
 std::mutex g_offline_mu;//离线表配套锁
 std::map<std::string, std::vector<std::string>> g_offline; //离线表，key-收件人昵称 value-待投递的完整协议行（vector）
+
+// 所有发给这个客户端的数据统一走这个函数，强制上锁，统一规范。“广播时多个线程写同一连接”
+bool sendTo(Client& c, const std::string& line) {
+    //发出方向（s->c）的抓包日志。放在锁外打，日志锁和写锁不嵌套
+    logMsg("[S->C] " + (c.name.empty() ? c.tag() : c.name) + " " +
+           std::to_string(line.size()) + "B " + line); //[21:46:51] [C->S] alice 7B LIST
+    std::lock_guard<std::mutex> lk(c.wmu);
+    return chat::sendLine(c.fd, line);
+}
 
 // 广播函数：给所有已登录连接发一行，except传谁就跳过谁（用来排除发送者本人，自己上线不要给自己发消息）
 void broadcast(const std::string& line, const std::shared_ptr<Client>& except = nullptr) {

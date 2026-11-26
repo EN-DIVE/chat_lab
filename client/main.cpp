@@ -1,12 +1,4 @@
-// client.cpp —— 第 8 块：健壮性收尾
-//
-// 第 7 块的结构不动，这一块只收口输入：
-//   1. 纯空白行直接忽略，不发出去；
-//   2. '|' 统一在本地拒绝，提示文案定稿（协议用 | 分隔字段）；
-//   3. 其余行为不变。
-//
-// 编译：g++ -std=c++17 -Wall -Wextra -pthread client.cpp -o client
-// 运行：./client [IP] [端口] [昵称]
+// client.cpp 
 #include "protocol.h"
 
 #include <arpa/inet.h>
@@ -69,9 +61,6 @@ void sayPush(const std::string& s) { //server推送消息走saypush，本地提�
     }
     std::cout << std::flush; //为了把>从缓冲区刷到屏幕（cout默认缓冲区，可能打印了迟迟不显示）
 }
-
-// 登录状态机：未登录 -> 已登录；连接断了转 Disconnected
-enum class State { LoggedOut, LoggedIn, Disconnected };
 
 // 按行读回包：缓冲区里已经切好的行先发出去，不够再 recv
 class Reader { //封装reader类读回包
@@ -138,6 +127,9 @@ std::string pretty(const std::string& line) {
 }
 
 }  // namespace
+
+// 登录状态机：未登录 -> 已登录；连接断了转 Disconnected
+enum class State { LoggedOut, LoggedIn, Disconnected };
 
 int main(int argc, char** argv) {
     // 和server同理，服务端可能随时断，send 触发 SIGPIPE 会直接杀掉客户端，所以忽略SIGPIPE
