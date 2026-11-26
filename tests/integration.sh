@@ -4,7 +4,8 @@
 #
 # 覆盖：登录 / 重名 / 未登录被拒 / 昵称校验 / 缺字段 / 断线释放昵称 / 拆包 / 粘包 /
 #       QUIT / 超长行 / 并发 / 上下线广播 / LIST / 逗号昵称 / 空格昵称 / 群聊 / 三人群聊 /
-#       空消息 / 消息含竖线 / 私聊 / 目标不在线 / 空白行 / 多余字段 / 抓包日志
+#       空消息 / 消息含竖线 / 私聊 / 目标离线暂存 / 离线消息投递 / 离线上限 /
+#       空白行 / 多余字段 / 抓包日志
 #
 # 用法：bash tests/integration.sh ./build/chat_server [端口]
 set -u
@@ -520,7 +521,7 @@ case_private_chat() {
     fi
 }
 
-# ---------- L22 私聊目标不在线 ----------
+# ---------- L22 私聊目标不在线：暂存并回 OK ----------
 case_private_offline() {
     start_server
     connect3 || { bad "L22 无法连接"; stop_server; return; }
@@ -531,8 +532,9 @@ case_private_offline() {
     disconnect3
     sleep 0.1
     stop_server
-    if [ "$reply" = "ERR|NO_SUCH_USER|用户不在线" ]; then
-        ok "L22 私聊目标不在线：回 NO_SUCH_USER"
+    if [ "$reply" = "OK|对方不在线，消息已暂存，上线后送达" ] \
+       && expect_log '离线暂存 alice -> nobody: hi'; then
+        ok "L22 私聊目标不在线：回 OK 说明已暂存"
     else
         bad "L22 目标不在线：reply='$reply'"
     fi
@@ -654,6 +656,69 @@ case_wiretap_log() {
     fi
 }
 
+# ---------- L29 离线私聊：对方上线后自动收到 ----------
+case_offline_message() {
+    start_server
+    connect3 || { bad "L29 A 连接失败"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3                               # OK|登录成功
+    printf 'PRIV|bob|离线留言\n' >&3
+    read3
+    local r1=$reply                     # OK|对方不在线，消息已暂存...
+    connect4 || { bad "L29 B 连接失败"; disconnect3; stop_server; return; }
+    printf 'LOGIN|bob\n' >&4
+    read4
+    local r2=$reply                     # OK|登录成功
+    read4
+    local r3=$reply                     # PRIVIN|alice|离线留言
+    read3                               # alice 收到 SYS|bob 上线了
+    disconnect4
+    disconnect3
+    sleep 0.15
+    stop_server
+    if [ "$r1" = "OK|对方不在线，消息已暂存，上线后送达" ] \
+       && [ "$r2" = "OK|登录成功" ] \
+       && [ "$r3" = "PRIVIN|alice|离线留言" ] \
+       && expect_log '投递离线消息 1 条 -> bob'; then
+        ok "L29 离线消息：暂存后 bob 登录立即收到"
+    else
+        bad "L29 离线消息：r1='$r1' r2='$r2' r3='$r3'"
+    fi
+}
+
+# ---------- L30 离线消息上限 20 条，丢最旧的 ----------
+case_offline_cap() {
+    start_server
+    connect3 || { bad "L30 A 连接失败"; stop_server; return; }
+    printf 'LOGIN|alice\n' >&3
+    read3
+    local i
+    for i in $(seq 1 21); do
+        printf 'PRIV|bob|m%s\n' "$i" >&3
+        read3                           # 每条都回 OK|已暂存
+    done
+    connect4 || { bad "L30 B 连接失败"; disconnect3; stop_server; return; }
+    printf 'LOGIN|bob\n' >&4
+    read4                               # OK|登录成功
+    local first="" last=""
+    for i in $(seq 1 20); do
+        read4
+        [ -z "$first" ] && first=$reply
+        last=$reply
+    done
+    read4
+    local extra=$reply                  # 第 21 条不该存在
+    disconnect4
+    disconnect3
+    sleep 0.15
+    stop_server
+    if [ "$first" = "PRIVIN|alice|m2" ] && [ "$last" = "PRIVIN|alice|m21" ] && [ -z "$extra" ]; then
+        ok "L30 离线上限：只保留最近 20 条"
+    else
+        bad "L30 离线上限：first='$first' last='$last' extra='$extra'"
+    fi
+}
+
 case_login_ok
 case_dup_name
 case_need_login
@@ -682,6 +747,8 @@ case_blank_lines
 case_list_extra_field
 case_quit_extra_field
 case_wiretap_log
+case_offline_message
+case_offline_cap
 
 printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

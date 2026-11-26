@@ -1,12 +1,11 @@
 // server.cpp
-//
-// 前 7 块的功能不动，这一块统一协议口径并加抓包式日志：
 //   1. 空行、纯空白行直接忽略；
 //   2. QUIT、LIST 不接受多余字段；LOGIN 的用法提示里不再出现 '|'；
 //   3. MSG/PRIV 内容含 '|' 直接拒绝（'|' 是字段分隔符，不允许出现在字段里）；
 //   4. 日志统一加时间戳，并按 [C->S] / [S->C] 打出双向报文；
 //   5. 超长行仍按协议错误处理：回 ERR 后关闭连接（正常客户端已提前拦截）。
 //   6. 昵称禁止空格、私聊发送失败要回错，保证 @昵称 一定能解析、消息不会静默丢失。
+//   7. 私聊目标离线时先暂存，对方登录后自动投递（每人最多 20 条）。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread server.cpp -o server
 // 运行：./server [端口]        Ctrl-C 结束
@@ -86,6 +85,11 @@ bool sendTo(Client& c, const std::string& line) {
 std::mutex g_online_mu;//用户online表配套锁
 std::map<std::string, std::shared_ptr<Client>> g_online; // map--key昵称 value这个昵称对应的client的指针
 
+// 离线私聊暂存：昵称 -> 待投递的 PRIVIN 行，等这个人登录时一次性交给他
+constexpr std::size_t kOfflineCap = 20; //每人最多存 20 条，超出丢最旧的
+std::mutex g_offline_mu;//离线表配套锁
+std::map<std::string, std::vector<std::string>> g_offline; //离线表，key-收件人昵称 value-待投递的完整协议行（vector）
+
 // 广播函数：给所有已登录连接发一行，except传谁就跳过谁（用来排除发送者本人，自己上线不要给自己发消息）
 void broadcast(const std::string& line, const std::shared_ptr<Client>& except = nullptr) {
     std::vector<std::shared_ptr<Client>> targets; //发送目标
@@ -98,6 +102,20 @@ void broadcast(const std::string& line, const std::shared_ptr<Client>& except = 
     }
     // sendTo 失败说明对方已经断了，不用管：它自己的 recv 线程迟早会发现并摘表
     for (const auto& t : targets) sendTo(*t, line);
+}
+
+// 离线私聊投递：登录成功后调用，把暂存的行一次性交给这个连接
+void deliverOffline(const std::shared_ptr<Client>& c) {
+    std::vector<std::string> pending;//待处理区
+    {
+        std::lock_guard<std::mutex> lk(g_offline_mu); //锁内只把队列搬空，不做 IO
+        auto it = g_offline.find(c->name);
+        if (it == g_offline.end()) return; //这个昵称没有暂存消息
+        pending = std::move(it->second); //把整箱消息搬到局部变量
+        g_offline.erase(it); //投递过就从表里删掉，避免下次重复发
+    }
+    for (const auto& line : pending) sendTo(*c, line); //锁外逐条发，和广播一个套路
+    logMsg("投递离线消息 " + std::to_string(pending.size()) + " 条 -> " + c->name);
 }
 
 // 昵称规则 1~16 字节、不含控制字符（'|' 会被 split 切走，天然进不来）
@@ -168,6 +186,9 @@ void handleLogin(const std::shared_ptr<Client>& c, const std::vector<std::string
     logMsg("登录成功: " + name + " (" + c->tag() + ")，当前在线 " + //tag 打印client地址的函数
            std::to_string(online_count));
 
+    // 离线消息必须在 OK 之后发：客户端登录阶段读到的第一行才是 OK，剩下的会留在 Reader 里给接收线程
+    deliverOffline(c);
+
     // 告诉其他人。排除自己——自己刚收到 OK|登录成功 了
     broadcast("SYS|" + name + " 上线了", c);
 }
@@ -220,8 +241,15 @@ void handlePriv(const std::shared_ptr<Client>& c, const std::vector<std::string>
         //shared_ptr保护的是Client 对象,使之若断开之后不被析构销毁，send还能运转只是返回-1
     }
 
-    if (!dst) { //目标不在线或根本不存在
-        sendTo(*c, "ERR|NO_SUCH_USER|用户不在线");
+    if (!dst) { //目标不在线：先暂存，等他登录再送
+        {
+            std::lock_guard<std::mutex> lk(g_offline_mu); //改离线表要加锁
+            auto& box = g_offline[f[1]]; //key 是收件人昵称，没有就建一个新的。box拿到的是这个名称对应的value vector引用
+            box.push_back("PRIVIN|" + c->name + "|" + f[2]); //存整行：原发送者 + 原内容
+            if (box.size() > kOfflineCap) box.erase(box.begin()); //超过上限丢最旧的
+        }
+        logMsg("离线暂存 " + c->name + " -> " + f[1] + ": " + f[2]);
+        sendTo(*c, "OK|对方不在线，消息已暂存，上线后送达"); //明确告诉发送者，不静默
         return;
     }
     logMsg("私聊 " + c->name + " -> " + f[1] + ": " + f[2]);

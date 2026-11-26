@@ -26,11 +26,11 @@
 
 | 类型 | 格式 | 示例 | 说明 |
 |---|---|---|---|
-| OK | `OK\|说明` | `OK\|登录成功` | 确认类回包，如登录成功、QUIT 再见等 |
+| OK | `OK\|说明` | `OK\|登录成功`、`OK\|对方不在线，消息已暂存，上线后送达` | 确认类回包，如登录成功、QUIT 再见等 |
 | ERR | `ERR\|代码\|说明` | `ERR\|NAME_TAKEN\|昵称已被占用` | 出错回包 |
 | ONLINE | `ONLINE\|a,b,c` | `ONLINE\|alice,bob` | 在线用户，按昵称字典序，逗号分隔 |
 | CHAT | `CHAT\|来源\|内容` | `CHAT\|bob\|大家好` | 群聊推送，不发给发送者 |
-| PRIVIN | `PRIVIN\|来源\|内容` | `PRIVIN\|bob\|要一起做chat_lab吗？` | 私聊推送，只发给目标一个连接 |
+| PRIVIN | `PRIVIN\|来源\|内容` | `PRIVIN\|bob\|要一起做chat_lab吗？` | 私聊推送，只发给目标一个连接，目标不在线时服务端暂存，上线后自动送达（每人最多 20 条） |
 | SYS | `SYS\|说明` | `SYS\|bob 上线了` | 系统推送，上下线通知 |
 
 ## 3. 字段约束
@@ -51,7 +51,7 @@
 |---|---|
 | NAME_TAKEN | 昵称已被占用 |
 | NEED_LOGIN | 还没登录就发了需要登录才能执行的命令 |
-| NO_SUCH_USER | 私聊目标不在线、不存在，或发送时刚好断开 |
+| NO_SUCH_USER | 私聊发送时目标客户刚好断开 |
 | BAD_FORMAT | 字段数量不对、内容为空、含 `\|`、单行过长、未知类型等 |
 
 ## 5. 一条消息的完整路径
@@ -147,10 +147,19 @@
 
 ### 5.7 PRIV 目标不在线，或刚好断开
 
-1. 查表时 `find` 不到（从未登录或已下线）→ 直接 `ERR|NO_SUCH_USER|用户不在线`，不会写任何 fd。
-2. 查表时还在，出锁后对方恰好断开：`sendTo` 失败（`SIGPIPE` 已忽略，`send` 返回 `-1/EPIPE`）→ 服务端补一条 `ERR|NO_SUCH_USER|用户不在线` 给发送者。
-3. 发送者的接收线程收到 `ERR`，打印 `[错误 NO_SUCH_USER] 用户不在线`.
-4. 服务端： `recv` 线程随后读到 0 或 `ECONNRESET`，`onDisconnect` 摘表并广播 `SYS|bob 下线了`。
+- **目标不在线**
+
+1. `handlePriv` 在 `g_online_mu` 内查不到目标，`dst` 为空。
+2. 进入 `g_offline_mu`，把 `PRIVIN|发送者|内容` 追加到 `g_offline[收件人]` 这个map里；超过 20 条时丢最旧的一条。
+3. 出锁后回 `OK|对方不在线，消息已暂存，上线后送达`，发送者知道消息传达。
+4. 目标下次登录：服务端回 `OK|登录成功` 之后调用 `deliverOffline`，锁内把整个队列搬空，锁外逐条 `sendTo`。
+5. 客户端登录阶段读到的第一行仍是 `OK`，其余 `PRIVIN` 留在 `Reader::pending_`，接收线程启动后依次打印成 `[私聊] 发送者: 内容`。
+
+**目标刚好断开**
+
+1. 查表时还在，出锁后对方断开，`sendTo` 返回 false（`SIGPIPE` 已忽略）。
+2. 回 `ERR|NO_SUCH_USER|用户不在线`。
+3. 对方的 `recv` 线程随后读到 0 或 `ECONNRESET`，摘表并广播下线。
 
 ### 5.8 QUIT 主动退出
 
@@ -186,7 +195,7 @@
 | 格式错误 | 服务端具体 `handleXxx` | 回 `ERR\|BAD_FORMAT\|…` |
 | 未知消息类型 | 服务端 `handleLine` 末尾 | 回 `ERR\|BAD_FORMAT\|暂不支持的消息类型: <前 16 字节>`，连接保留 |
 | 用户突然关闭程序 | 服务端 `recv` | 返回 0 或 `ECONNRESET`，广播 `SYS` 下线并释放昵称 |
-| 私聊对象离线 | 服务端 `handlePriv` | 查表找不到目标客户 `dst`，回 `ERR\|NO_SUCH_USER\|用户不在线` |
+| 私聊对象离线 | 服务端 `handlePriv` | 暂存到 `g_offline[收件人]`（上限 20 条），向客户端回 `OK` 说明已暂存；对方登录后自动投递 |
 | 私聊对象刚好断开 | 服务端 `handlePriv` | `send` 失败，同样回 `ERR\|NO_SUCH_USER` |
 | 网络中断、服务端退出 | 客户端 `recv` | 返回 0，接收线程打印“服务端已断开”，主线程下次检查 `g_running == false` 时退出 |
 | 主线程卡在输入 | 客户端 | 服务端断开时主线程可能还停在 `getline`，按回车或 Ctrl-D 才会退出 |
