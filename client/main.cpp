@@ -186,6 +186,7 @@ int main(int argc, char** argv) {
             }
             if (name.empty()) continue;
         }
+        //本地合法性校验
         if (name.find('|') != std::string::npos) {//本地先按服务端规则挡一遍，少一趟往返
             std::cout << "昵称里不能含 '|'（会破坏一行一消息的协议）\n";
             name.clear();
@@ -196,12 +197,13 @@ int main(int argc, char** argv) {
             name.clear();
             continue;
         }
-
+        //发送LOGIN信息
         if (!chat::sendLine(fd, "LOGIN|" + name)) {
             std::cerr << "发送失败\n";
             ::close(fd);
             return 1;
         }
+        //主线程用reader.next接收回包
         if (!reader.next(reply)) {
             std::cerr << "服务端已断开\n";
             ::close(fd);

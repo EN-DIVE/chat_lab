@@ -1,4 +1,4 @@
-// server.cpp —— 第 8 块：健壮性收尾
+// server.cpp
 //
 // 前 7 块的功能不动，这一块统一协议口径并加抓包式日志：
 //   1. 空行、纯空白行直接忽略；
@@ -6,6 +6,7 @@
 //   3. MSG/PRIV 内容含 '|' 直接拒绝（'|' 是字段分隔符，不允许出现在字段里）；
 //   4. 日志统一加时间戳，并按 [C->S] / [S->C] 打出双向报文；
 //   5. 超长行仍按协议错误处理：回 ERR 后关闭连接（正常客户端已提前拦截）。
+//   6. 昵称禁止空格、私聊发送失败要回错，保证 @昵称 一定能解析、消息不会静默丢失。
 //
 // 编译：g++ -std=c++17 -Wall -Wextra -pthread server.cpp -o server
 // 运行：./server [端口]        Ctrl-C 结束
@@ -113,6 +114,10 @@ bool validName(const std::string& name, std::string& why) { //昵称合法性校
         why = "昵称不能包含逗号（ONLINE 列表用逗号分隔）";
         return false;
     }
+    if (name.find(' ') != std::string::npos) { //客户端 @昵称 用空格分隔，昵称带空格就永远 @ 不到
+        why = "昵称不能包含空格（@昵称 私聊用空格分隔）";
+        return false;
+    }
     for (unsigned char ch : name) {
         if (ch < 0x20 || ch == 0x7f) { //<0x20是包括所有不可见的控制字符（换行等），0x7f del，不用考虑|，他会直接被split切走
             why = "昵称不能包含控制字符";
@@ -180,7 +185,7 @@ void handleList(const std::shared_ptr<Client>& c) { //c请求者
     sendTo(*c, "ONLINE|" + names); //锁外再发
 }
 
-// 第 5 块新增：MSG|内容 -> CHAT|来源|内容，广播给其他人，发送者自己不发
+// MSG|内容 -> CHAT|来源|内容，广播给其他人，发送者自己不发
 void handleMsg(const std::shared_ptr<Client>& c, const std::vector<std::string>& f) { //群聊
     //先处理错误信息情况
     if (f.size() > 2) { //内容里出现'|'会被 split 切成多段，'|' 是协议分隔符，直接拒绝
@@ -212,6 +217,7 @@ void handlePriv(const std::shared_ptr<Client>& c, const std::vector<std::string>
         std::lock_guard<std::mutex> lk(g_online_mu); //查表要加锁
         auto it = g_online.find(f[1]); //在online表里查找f[1]，待发送对象的昵称
         if (it != g_online.end()) dst = it->second; //拷一份 shared_ptr 出来，出锁后对象不会被析构
+        //shared_ptr保护的是Client 对象,使之若断开之后不被析构销毁，send还能运转只是返回-1
     }
 
     if (!dst) { //目标不在线或根本不存在
@@ -220,7 +226,9 @@ void handlePriv(const std::shared_ptr<Client>& c, const std::vector<std::string>
     }
     logMsg("私聊 " + c->name + " -> " + f[1] + ": " + f[2]);
     // 点对点：只往目标一个fd去sendto
-    sendTo(*dst, "PRIVIN|" + c->name + "|" + f[2]);
+    if (!sendTo(*dst, "PRIVIN|" + c->name + "|" + f[2])) { //对方刚好在这期间断开
+        sendTo(*c, "ERR|NO_SUCH_USER|用户不在线"); //不能让发送者以为消息送到了
+    }
 }
 
 // 连接结束摘表，否则昵称永远被占，重连就是 NAME_TAKEN

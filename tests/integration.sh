@@ -3,7 +3,7 @@
 # 启动真正的 chat_server，用 bash 内置的 /dev/tcp 当客户端（不需要 netcat）。
 #
 # 覆盖：登录 / 重名 / 未登录被拒 / 昵称校验 / 缺字段 / 断线释放昵称 / 拆包 / 粘包 /
-#       QUIT / 超长行 / 并发 / 上下线广播 / LIST / 逗号昵称 / 群聊 / 三人群聊 /
+#       QUIT / 超长行 / 并发 / 上下线广播 / LIST / 逗号昵称 / 空格昵称 / 群聊 / 三人群聊 /
 #       空消息 / 消息含竖线 / 私聊 / 目标不在线 / 空白行 / 多余字段 / 抓包日志
 #
 # 用法：bash tests/integration.sh ./build/chat_server [端口]
@@ -373,11 +373,27 @@ case_comma_name() {
     fi
 }
 
-# ---------- L16 群聊：发送者自己收不到 ----------
+# ---------- L16 昵称带空格被拒 ----------
+case_space_name() {
+    start_server
+    connect3 || { bad "L16 无法连接"; stop_server; return; }
+    printf 'LOGIN|a b\n' >&3
+    read3
+    disconnect3
+    sleep 0.1
+    stop_server
+    if [ "$reply" = "ERR|BAD_FORMAT|昵称不能包含空格（@昵称 私聊用空格分隔）" ]; then
+        ok "L16 昵称校验：空格会让 @昵称 解析失败，被拒绝"
+    else
+        bad "L16 空格昵称：reply='$reply'"
+    fi
+}
+
+# ---------- L17 群聊：发送者自己收不到 ----------
 case_group_chat() {
     start_server
-    connect3 || { bad "L16 A 连接失败"; stop_server; return; }
-    connect4 || { bad "L16 B 连接失败"; disconnect3; stop_server; return; }
+    connect3 || { bad "L17 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L17 B 连接失败"; disconnect3; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'LOGIN|bob\n' >&4
@@ -393,18 +409,18 @@ case_group_chat() {
     sleep 0.15
     stop_server
     if [ "$got" = "CHAT|alice|大家好" ] && [ -z "$self" ] && expect_log '群聊 alice -> 大家好'; then
-        ok "L16 群聊：bob 收到 CHAT|alice|大家好，alice 自己不收"
+        ok "L17 群聊：bob 收到 CHAT|alice|大家好，alice 自己不收"
     else
-        bad "L16 群聊：got='$got' self='$self'"
+        bad "L17 群聊：got='$got' self='$self'"
     fi
 }
 
-# ---------- L17 三人群聊：两个接收者都收到 ----------
+# ---------- L18 三人群聊：两个接收者都收到 ----------
 case_three_way() {
     start_server
-    connect3 || { bad "L17 A 连接失败"; stop_server; return; }
-    connect4 || { bad "L17 B 连接失败"; disconnect3; stop_server; return; }
-    connect5 || { bad "L17 C 连接失败"; disconnect4; disconnect3; stop_server; return; }
+    connect3 || { bad "L18 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L18 B 连接失败"; disconnect3; stop_server; return; }
+    connect5 || { bad "L18 C 连接失败"; disconnect4; disconnect3; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'LOGIN|bob\n' >&4
@@ -427,16 +443,16 @@ case_three_way() {
     sleep 0.15
     stop_server
     if [ "$rb" = "CHAT|alice|hi" ] && [ "$rc" = "CHAT|alice|hi" ] && [ -z "$ra" ]; then
-        ok "L17 三人群聊：bob、carol 都收到，alice 自己不收"
+        ok "L18 三人群聊：bob、carol 都收到，alice 自己不收"
     else
-        bad "L17 三人群聊：rb='$rb' rc='$rc' ra='$ra'"
+        bad "L18 三人群聊：rb='$rb' rc='$rc' ra='$ra'"
     fi
 }
 
-# ---------- L18 MSG 空内容被拒 ----------
+# ---------- L19 MSG 空内容被拒 ----------
 case_empty_msg() {
     start_server
-    connect3 || { bad "L18 无法连接"; stop_server; return; }
+    connect3 || { bad "L19 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'MSG|\n' >&3
@@ -445,16 +461,16 @@ case_empty_msg() {
     sleep 0.1
     stop_server
     if [ "$reply" = "ERR|BAD_FORMAT|MSG 需要一个非空内容" ]; then
-        ok "L18 空消息：回 BAD_FORMAT"
+        ok "L19 空消息：回 BAD_FORMAT"
     else
-        bad "L18 空消息：reply='$reply'"
+        bad "L19 空消息：reply='$reply'"
     fi
 }
 
-# ---------- L19 MSG 内容含竖线被拒 ----------
+# ---------- L20 MSG 内容含竖线被拒 ----------
 case_pipe_in_msg() {
     start_server
-    connect3 || { bad "L19 无法连接"; stop_server; return; }
+    connect3 || { bad "L20 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'MSG|a|b\n' >&3
@@ -463,18 +479,18 @@ case_pipe_in_msg() {
     sleep 0.1
     stop_server
     if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线" ]; then
-        ok "L19 消息含竖线：回 BAD_FORMAT"
+        ok "L20 消息含竖线：回 BAD_FORMAT"
     else
-        bad "L19 消息含竖线：reply='$reply'"
+        bad "L20 消息含竖线：reply='$reply'"
     fi
 }
 
-# ---------- L20 私聊只送达对象，第三人看不到 ----------
+# ---------- L21 私聊只送达对象，第三人看不到 ----------
 case_private_chat() {
     start_server
-    connect3 || { bad "L20 A 连接失败"; stop_server; return; }
-    connect4 || { bad "L20 B 连接失败"; disconnect3; stop_server; return; }
-    connect5 || { bad "L20 C 连接失败"; disconnect4; disconnect3; stop_server; return; }
+    connect3 || { bad "L21 A 连接失败"; stop_server; return; }
+    connect4 || { bad "L21 B 连接失败"; disconnect3; stop_server; return; }
+    connect5 || { bad "L21 C 连接失败"; disconnect4; disconnect3; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'LOGIN|bob\n' >&4
@@ -498,16 +514,16 @@ case_private_chat() {
     stop_server
     if [ "$rb" = "PRIVIN|alice|晚上自习吗" ] && [ -z "$rc" ] && [ -z "$ra" ] \
        && expect_log '私聊 alice -> bob: 晚上自习吗'; then
-        ok "L20 私聊：bob 收到 PRIVIN，carol 和 alice 都没收到"
+        ok "L21 私聊：bob 收到 PRIVIN，carol 和 alice 都没收到"
     else
-        bad "L20 私聊：rb='$rb' rc='$rc' ra='$ra'"
+        bad "L21 私聊：rb='$rb' rc='$rc' ra='$ra'"
     fi
 }
 
-# ---------- L21 私聊目标不在线 ----------
+# ---------- L22 私聊目标不在线 ----------
 case_private_offline() {
     start_server
-    connect3 || { bad "L21 无法连接"; stop_server; return; }
+    connect3 || { bad "L22 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'PRIV|nobody|hi\n' >&3
@@ -516,16 +532,16 @@ case_private_offline() {
     sleep 0.1
     stop_server
     if [ "$reply" = "ERR|NO_SUCH_USER|用户不在线" ]; then
-        ok "L21 私聊目标不在线：回 NO_SUCH_USER"
+        ok "L22 私聊目标不在线：回 NO_SUCH_USER"
     else
-        bad "L21 目标不在线：reply='$reply'"
+        bad "L22 目标不在线：reply='$reply'"
     fi
 }
 
-# ---------- L22 私聊缺内容 ----------
+# ---------- L23 私聊缺内容 ----------
 case_private_missing() {
     start_server
-    connect3 || { bad "L22 无法连接"; stop_server; return; }
+    connect3 || { bad "L23 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'PRIV|bob\n' >&3
@@ -534,16 +550,16 @@ case_private_missing() {
     sleep 0.1
     stop_server
     if [ "$reply" = "ERR|BAD_FORMAT|PRIV 需要对象和内容两个字段" ]; then
-        ok "L22 私聊缺内容：回 BAD_FORMAT"
+        ok "L23 私聊缺内容：回 BAD_FORMAT"
     else
-        bad "L22 私聊缺内容：reply='$reply'"
+        bad "L23 私聊缺内容：reply='$reply'"
     fi
 }
 
-# ---------- L23 私聊内容含竖线 ----------
+# ---------- L24 私聊内容含竖线 ----------
 case_private_pipe() {
     start_server
-    connect3 || { bad "L23 无法连接"; stop_server; return; }
+    connect3 || { bad "L24 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'PRIV|bob|a|b\n' >&3
@@ -552,32 +568,32 @@ case_private_pipe() {
     sleep 0.1
     stop_server
     if [ "$reply" = "ERR|BAD_FORMAT|内容里不能包含竖线" ]; then
-        ok "L23 私聊含竖线：回 BAD_FORMAT"
+        ok "L24 私聊含竖线：回 BAD_FORMAT"
     else
-        bad "L23 私聊含竖线：reply='$reply'"
+        bad "L24 私聊含竖线：reply='$reply'"
     fi
 }
 
-# ---------- L24 空白行被忽略 ----------
+# ---------- L25 空白行被忽略 ----------
 case_blank_lines() {
     start_server
-    connect3 || { bad "L24 无法连接"; stop_server; return; }
+    connect3 || { bad "L25 无法连接"; stop_server; return; }
     printf '   \n\n\t\nLOGIN|alice\n' >&3
     read3
     disconnect3
     sleep 0.1
     stop_server
     if [ "$reply" = "OK|登录成功" ] && ! grep -qF '暂不支持的消息类型' "$LOG"; then
-        ok "L24 空白行：被忽略，不影响后续命令"
+        ok "L25 空白行：被忽略，不影响后续命令"
     else
-        bad "L24 空白行：reply='$reply'"
+        bad "L25 空白行：reply='$reply'"
     fi
 }
 
-# ---------- L25 LIST 带多余字段 ----------
+# ---------- L26 LIST 带多余字段 ----------
 case_list_extra_field() {
     start_server
-    connect3 || { bad "L25 无法连接"; stop_server; return; }
+    connect3 || { bad "L26 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'LIST|x\n' >&3
@@ -590,16 +606,16 @@ case_list_extra_field() {
     sleep 0.1
     stop_server
     if [ "$r1" = "ERR|BAD_FORMAT|LIST 不带参数" ] && [ "$r2" = "ONLINE|alice" ]; then
-        ok "L25 LIST 多余字段：先拒绝，正常 LIST 仍可用"
+        ok "L26 LIST 多余字段：先拒绝，正常 LIST 仍可用"
     else
-        bad "L25 LIST 多余字段：r1='$r1' r2='$r2'"
+        bad "L26 LIST 多余字段：r1='$r1' r2='$r2'"
     fi
 }
 
-# ---------- L26 QUIT 带多余字段 ----------
+# ---------- L27 QUIT 带多余字段 ----------
 case_quit_extra_field() {
     start_server
-    connect3 || { bad "L26 无法连接"; stop_server; return; }
+    connect3 || { bad "L27 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'QUIT|x\n' >&3
@@ -614,16 +630,16 @@ case_quit_extra_field() {
     sleep 0.1
     stop_server
     if [ "$r1" = "ERR|BAD_FORMAT|QUIT 不带参数" ] && [ "$r2" = "OK|再见" ] && [ "$rc" = "1" ]; then
-        ok "L26 QUIT 多余字段：先拒绝，正常 QUIT 仍有效"
+        ok "L27 QUIT 多余字段：先拒绝，正常 QUIT 仍有效"
     else
-        bad "L26 QUIT 多余字段：r1='$r1' r2='$r2' eof_rc=$rc"
+        bad "L27 QUIT 多余字段：r1='$r1' r2='$r2' eof_rc=$rc"
     fi
 }
 
-# ---------- L27 抓包式日志 ----------
+# ---------- L28 抓包式日志 ----------
 case_wiretap_log() {
     start_server
-    connect3 || { bad "L27 无法连接"; stop_server; return; }
+    connect3 || { bad "L28 无法连接"; stop_server; return; }
     printf 'LOGIN|alice\n' >&3
     read3
     printf 'MSG|hi\n' >&3
@@ -632,9 +648,9 @@ case_wiretap_log() {
     sleep 0.1
     stop_server
     if expect_log '[C->S] alice' && expect_log '[S->C] alice'; then
-        ok "L27 抓包日志：C->S 和 S->C 都有记录"
+        ok "L28 抓包日志：C->S 和 S->C 都有记录"
     else
-        bad "L27 抓包日志：缺少方向标记"
+        bad "L28 抓包日志：缺少方向标记"
     fi
 }
 
@@ -653,6 +669,7 @@ case_list_and_online
 case_offline_broadcast
 case_list_need_login
 case_comma_name
+case_space_name
 case_group_chat
 case_three_way
 case_empty_msg
