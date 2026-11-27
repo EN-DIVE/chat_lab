@@ -15,7 +15,7 @@ else()
     add_compile_options(-Wall -Wextra)
 endif()
 
-# common/ 被三个目标共用，只声明一次头文件路径
+# common/ 被多个目标共用，只声明一次头文件路径
 add_library(chat_common INTERFACE)
 target_include_directories(chat_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/common)
 target_link_libraries(chat_common INTERFACE Threads::Threads)
@@ -25,6 +25,10 @@ target_link_libraries(chat_server PRIVATE chat_common)
 
 add_executable(chat_client client/main.cpp)
 target_link_libraries(chat_client PRIVATE chat_common)
+
+# 第二版：手写 HTTP 服务端（静态文件 + 后续 /api）
+add_executable(chat_web_server server/web_server.cpp)
+target_link_libraries(chat_web_server PRIVATE chat_common)
 
 enable_testing()
 

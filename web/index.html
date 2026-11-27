@@ -1,0 +1,40 @@
+<!doctype html>
+<!-- C++ web_server.cpp 返回这个文本给浏览器；浏览器读取这份代码，渲染出一个页面。 -->
+<!-- 标签大多成对：<>开始标签 </> 结束标签 -->
+<html lang="zh-CN"><!-- html网页根标签，语言为中文 -->
+<head><!-- 头部区域：head 里面的东西不会显示在页面可视区域。这里放网页的配置、编码、标题、样式，不给用户直接看。 -->
+    <meta charset="utf-8"><!-- meta元信息标签，设置网页文字编码为 UTF‑8，用来正常显示中文。写中文网页必须要有。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1"><!-- 适配手机浏览器：网页宽度等于手机屏幕宽度。 -->
+    <title>chat_lab 第二版</title><!-- 网页标题。显示在浏览器标签页的文字，不是页面正文。 -->
+    <style>
+        body {
+            max-width: 640px;
+            margin: 64px auto;
+            padding: 0 16px;
+            font-family: system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+            color: #222;
+            line-height: 1.7;
+        }
+        h1 { font-size: 24px; }
+        code {
+            background: #f3f3f3;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .box {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 16px 20px;
+            background: #fafafa;
+        }
+    </style>
+</head>
+<body><!-- 页面的内容全部写在这里 -->
+    <h1>chat_lab 第二版</h1><!-- 一级大标题 -->
+    <div class="box"><!-- div通用容器块，类型是box -->
+        <p>这个页面是 v2_HTTP 服务端返回的静态文件 /index.html。</p><!-- p paragraph，表示分段 -->
+        <p>第一步只验证：请求行解析、<code>Content-Length</code>、静态文件与 MIME 类型。</p><!-- code 标签，里面的文字会变成灰色背景，像代码一样。 -->
+        <p>下一步：<code>/api/ping</code>、注册登录、在线列表、群聊与私聊。</p>
+    </div>
+</body>
+</html>
