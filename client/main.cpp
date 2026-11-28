@@ -91,10 +91,10 @@ private:
 
 // 把协议行翻译成给人看的一行
 std::string pretty(const std::string& line) {
-    if (line.rfind("SYS|", 0) == 0) { //rfind从右向左扫，又限制了在0号位置匹配前缀，所以变成了前缀检验工具，是==0，否==npos
+    if (line.find("SYS|") == 0) { 
         return "[系统] " + line.substr(4);//从4位开始后面才是推送内容
     }
-    if (line.rfind("ONLINE|", 0) == 0) {
+    if (line.find("ONLINE|") == 0) {
         std::string s = "在线: ";
         for (char ch : line.substr(7)) {
             s += ch;
@@ -102,21 +102,21 @@ std::string pretty(const std::string& line) {
         }
         return s;
     }
-    if (line.rfind("CHAT|", 0) == 0) { //群聊：CHAT|来源|内容 -> 来源: 内容
+    if (line.find("CHAT|") == 0) { //群聊：CHAT|来源|内容 -> 来源: 内容
         std::string rest = line.substr(5); //裁掉前缀CHAT|后剩下的部分
         std::size_t bar = rest.find('|');
         if (bar != std::string::npos) { //bar-|位置
             return rest.substr(0, bar) + ": " + rest.substr(bar + 1);
         }
     }
-    if (line.rfind("PRIVIN|", 0) == 0) { //私聊：PRIVIN|来源|内容 -> [私聊] 来源: 内容
+    if (line.find("PRIVIN|") == 0) { //私聊：PRIVIN|来源|内容 -> [私聊] 来源: 内容
         std::string rest = line.substr(7); //裁掉前缀PRIVIN|后剩下的部分
         std::size_t bar = rest.find('|');
         if (bar != std::string::npos) {
             return "[私聊] " + rest.substr(0, bar) + ": " + rest.substr(bar + 1);
         }
     }
-    if (line.rfind("ERR|", 0) == 0) { //ERR|代码|说明 -> [错误 代码] 说明
+    if (line.find("ERR|") == 0) { //ERR|代码|说明 -> [错误 代码] 说明
         std::size_t p = line.find('|', 4);
         if (p != std::string::npos) {
             return "[错误 " + line.substr(4, p - 4) + "] " + line.substr(p + 1);
